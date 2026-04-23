@@ -2335,7 +2335,7 @@ void updateTxPower(int8_t rssi) {
 
   // 3. 쿨다운 (반응 속도 향상)
   if (targetMode != currentTxMode) {
-    if (millis() - lastChange < 1200) return;
+    if (millis() - lastChange < 800) return;
 
     lastChange = millis();
     currentTxMode = targetMode;
@@ -2437,7 +2437,7 @@ void tud_midi_rx_cb(uint8_t itf) {
 // ==========================================
 void monitorHostRssi(unsigned long now) {
   static unsigned long lastRssiCheck = 0;
-  if (now - lastRssiCheck > 2000) {
+  if (now - lastRssiCheck > 1000) {
     lastRssiCheck = now;
 
     int8_t lowestRssi = 0;
@@ -2839,24 +2839,51 @@ void loopHostMode(unsigned long now) {
   // 2. 스캐너 및 연결 전력 관리
   bool scanNeeded = isScanRequired();
   bool inScanMenu = (currentState == SCAN_MENU);
+  bool anyConnected = false;
+  bool hasOfflineSlot = false;
+  for (int i = 0; i < 3; i++) {
+    if (slots[i].status == CONNECTED) {
+      anyConnected = true;
+    } else if (slots[i].status == OFFLINE) {
+      hasOfflineSlot = true;
+    }
+  }
+
+  // 일부 슬롯이 끊긴 상태(부분 오프라인)에서는 재연결 우선으로 BOOST를 강제한다.
+  if (anyConnected && hasOfflineSlot) {
+    if (activeTxPower != 8) {
+      activeTxPower = 8;
+      currentTxMode = POWER_BOOST;
+      Bluefruit.setTxPower(8);
+    }
+  }
+  // 오프라인 슬롯이 없을 때만 RSSI 기반 가변 전력 사용
+  else if (anyConnected) {
+    monitorHostRssi(now);
+  }
 
   if (scanNeeded || inScanMenu) {
-    if (scanStartTime == 0) scanStartTime = now;
+    // "전부 오프라인(연결 0)" 구간에서만 절전 타이머를 누적한다.
+    // 하나라도 연결되면 RSSI 가변 제어를 우선하고 타이머는 리셋한다.
+    if (!anyConnected) {
+      if (scanStartTime == 0) scanStartTime = now;
 
-    // 20분 경과 시 저전력 모드 (배터리 보호)
-    if (now - scanStartTime > 1200000) {
-      if (activeTxPower != 0) {
-        activeTxPower = 0;
-        currentTxMode = POWER_NORMAL;
-        Bluefruit.setTxPower(0);
+      // 수동 스캔 메뉴가 아닐 때만 20분 절전(NORMAL) 적용
+      if (!inScanMenu && (now - scanStartTime > 1200000UL)) {
+        if (activeTxPower != 0) {
+          activeTxPower = 0;
+          currentTxMode = POWER_NORMAL;
+          Bluefruit.setTxPower(0);
+        }
+      } else {
+        if (activeTxPower != 8) {
+          activeTxPower = 8;
+          currentTxMode = POWER_BOOST;
+          Bluefruit.setTxPower(8);
+        }
       }
     } else {
-      // 스캔 중에는 강력한 신호 유지
-      if (activeTxPower != 8) {
-        activeTxPower = 8;
-        currentTxMode = POWER_BOOST;
-        Bluefruit.setTxPower(8);
-      }
+      scanStartTime = 0;
     }
 
     // [핵심 수정] 스캐너 실행 조건: 스캔이 필요하거나 사용자가 스캔 메뉴에 있을 때
@@ -2868,7 +2895,6 @@ void loopHostMode(unsigned long now) {
   } else {
     // 모든 기기 연결됨 & 메뉴 밖임 -> 타이머 리셋 및 가변 전력 모니터링
     scanStartTime = 0;
-    monitorHostRssi(now);
 
     // 스캔이 필요 없는 상황이면 스캐너 중지 (자원 절약)
     if (Bluefruit.Scanner.isRunning()) {
