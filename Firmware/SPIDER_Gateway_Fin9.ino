@@ -141,6 +141,13 @@ enum TxPowerMode { POWER_NORMAL,
 TxPowerMode currentTxMode = POWER_NORMAL;
 int8_t activeTxPower = 0;
 
+enum ConnectionMatchMode { MATCH_MAC_ONLY = 0,
+                           MATCH_MAC_AND_NAME = 1 };
+ConnectionMatchMode currentConnectionMatchMode = MATCH_MAC_AND_NAME;
+void drawConnectionModeMenu();
+void saveConnectionMatchMode(ConnectionMatchMode mode);
+ConnectionMatchMode loadConnectionMatchMode();
+
 struct Device {
   uint8_t mac[6];
   int8_t rssi;
@@ -152,7 +159,8 @@ enum State { MAIN_MENU,
              SLOT_MENU,
              SCAN_MENU,
              MODE_SELECT,
-             CLIENT_MENU };
+             CLIENT_MENU,
+             CONNECTION_MODE_MENU };
 State currentState = MAIN_MENU;
 SystemMode currentSystemMode = MODE_HOST;
 int modeSelection = 0;
@@ -184,6 +192,7 @@ typedef Slot SlotConfig;
 int slotMenuSelection = 0;
 int selectedSlotIdx = -1;
 int scanMenuSelection = 0;
+int connectionModeSelection = 0;
 
 bool macEqual(const uint8_t *a, const uint8_t *b) {
   for (int i = 0; i < 6; i++) {
@@ -858,6 +867,10 @@ void updateDisplay() {
     drawModeSelect();
     return;
   }
+  if (currentState == CONNECTION_MODE_MENU) {
+    drawConnectionModeMenu();
+    return;
+  }
 
   if (currentSystemMode == MODE_CLIENT) {
     if (currentState == CLIENT_MENU) {
@@ -1060,6 +1073,39 @@ void drawScanMenu() {
       }
     }
   }
+}
+
+void saveConnectionMatchMode(ConnectionMatchMode mode) {
+  if (InternalFS.exists("/conn_mode.bin")) {
+    InternalFS.remove("/conn_mode.bin");
+  }
+
+  File file = InternalFS.open("/conn_mode.bin", Adafruit_LittleFS_Namespace::FILE_O_WRITE);
+  if (file) {
+    uint8_t data = (uint8_t)mode;
+    file.write(&data, 1);
+    file.flush();
+    file.close();
+    Serial.print(F(">>> CONNECTION MODE SAVED: "));
+    Serial.println(mode == MATCH_MAC_ONLY ? "MAC_ONLY" : "MAC_AND_NAME");
+  } else {
+    Serial.println(F(">>> ERROR: Failed to open /conn_mode.bin for writing!"));
+  }
+}
+
+ConnectionMatchMode loadConnectionMatchMode() {
+  ConnectionMatchMode mode = MATCH_MAC_AND_NAME;  // 기존 동작과 동일한 기본값
+  if (InternalFS.exists("/conn_mode.bin")) {
+    File file = InternalFS.open("/conn_mode.bin", FILE_O_READ);
+    if (file) {
+      uint8_t data = (uint8_t)MATCH_MAC_AND_NAME;
+      file.read(&data, 1);
+      file.close();
+      if (data == (uint8_t)MATCH_MAC_ONLY) mode = MATCH_MAC_ONLY;
+      else mode = MATCH_MAC_AND_NAME;
+    }
+  }
+  return mode;
 }
 
 void drawSlotRow(int y, int slotIdx) {
@@ -1346,7 +1392,8 @@ void handleEncoder(unsigned long now) {
 
   // --- 상태별 엔코더 동작 ---
   if (currentState == MODE_SELECT) {
-    encoderPos = constrain(encoderPos + moveStep, 0, 1);
+    int maxModeSelect = (currentSystemMode == MODE_HOST) ? 2 : 1;
+    encoderPos = constrain(encoderPos + moveStep, 0, maxModeSelect);
     modeSelection = (int)encoderPos;
   } else if (currentState == MAIN_MENU) {
     if (currentSystemMode == MODE_HOST) {
@@ -1383,6 +1430,9 @@ void handleEncoder(unsigned long now) {
   } else if (currentState == CLIENT_MENU) {
     clientMenuSelection = constrain(clientMenuSelection + moveStep, 0, 1);
     encoderPos = clientMenuSelection;
+  } else if (currentState == CONNECTION_MODE_MENU) {
+    connectionModeSelection = constrain(connectionModeSelection + moveStep, 0, 2);
+    encoderPos = connectionModeSelection;
   }
 }
 
@@ -1478,8 +1528,14 @@ void handleButton(unsigned long now) {
           currentState = MAIN_MENU;
           currentSelection = -1;
           encoderPos = 0;
-        } else if (modeSelection == 1) {
-          // [1: MODE CHANGE] 선택 시
+        } else if (modeSelection == 1 && currentSystemMode == MODE_HOST) {
+          // [1: CONNECTION TYPE] 선택 시
+          currentState = CONNECTION_MODE_MENU;
+          connectionModeSelection = 0;
+          encoderPos = 0;
+        } else if ((currentSystemMode == MODE_HOST && modeSelection == 2) ||
+                   (currentSystemMode == MODE_CLIENT && modeSelection == 1)) {
+          // [MODE CHANGE] 선택 시
           SystemMode selected = (currentSystemMode == MODE_HOST) ? MODE_CLIENT : MODE_HOST;
           saveSystemMode(selected);
 
@@ -1492,6 +1548,32 @@ void handleButton(unsigned long now) {
 
           Serial.println(F(">>> MODE CHANGED: REBOOTING SYSTEM <<<"));
           NVIC_SystemReset();
+        }
+      }
+
+      else if (currentState == CONNECTION_MODE_MENU) {
+        if (connectionModeSelection == 0) {
+          currentState = MODE_SELECT;
+          modeSelection = 1;
+          encoderPos = modeSelection;
+        } else if (connectionModeSelection == 1) {
+          currentConnectionMatchMode = MATCH_MAC_ONLY;
+          saveConnectionMatchMode(currentConnectionMatchMode);
+          strncpy(errorMsg, "MATCH: MAC ONLY", 19);
+          errorMsg[19] = '\0';
+          errorMsgUntil = millis() + 1200;
+          currentState = MODE_SELECT;
+          modeSelection = 1;
+          encoderPos = modeSelection;
+        } else if (connectionModeSelection == 2) {
+          currentConnectionMatchMode = MATCH_MAC_AND_NAME;
+          saveConnectionMatchMode(currentConnectionMatchMode);
+          strncpy(errorMsg, "MATCH: MAC+NAME", 19);
+          errorMsg[19] = '\0';
+          errorMsgUntil = millis() + 1200;
+          currentState = MODE_SELECT;
+          modeSelection = 1;
+          encoderPos = modeSelection;
         }
       }
 
@@ -1733,11 +1815,15 @@ void drawModeSelect() {
   display.drawRect(0, 16, 128, 48, WHITE);
 
   // 현재 모드에 따라 메뉴 리스트 구성
-  const char *options[2];
-  options[0] = "<< BACK";
-  options[1] = (currentSystemMode == MODE_HOST) ? "TO CLIENT MODE" : "TO HOST MODE";
+  const char *options[3];
+  int optionCount = 0;
+  options[optionCount++] = "<< BACK";
+  if (currentSystemMode == MODE_HOST) {
+    options[optionCount++] = "CONNECTION TYPE";
+  }
+  options[optionCount++] = (currentSystemMode == MODE_HOST) ? "TO CLIENT MODE" : "TO HOST MODE";
 
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < optionCount; i++) {
     int yPos = 24 + (i * 12);
 
     if (modeSelection == i) {
@@ -1749,6 +1835,39 @@ void drawModeSelect() {
 
     display.setCursor(5, yPos);
     display.println(options[i]);
+  }
+
+  display.display();
+}
+
+void drawConnectionModeMenu() {
+  display.clearDisplay();
+
+  display.fillRect(0, 0, 128, 14, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(2, 3);
+  display.print(F("CONNECTION TYPE"));
+
+  display.drawRect(0, 16, 128, 48, WHITE);
+
+  const char *options[3] = { "<< BACK", "MAC", "NAME" };
+  for (int i = 0; i < 3; i++) {
+    int yPos = 24 + (i * 12);
+    if (connectionModeSelection == i) {
+      display.fillRect(2, yPos - 2, 124, 13, WHITE);
+      display.setTextColor(BLACK);
+    } else {
+      display.setTextColor(WHITE);
+    }
+
+    display.setCursor(5, yPos);
+    display.print(options[i]);
+
+    if ((i == 1 && currentConnectionMatchMode == MATCH_MAC_ONLY) ||
+        (i == 2 && currentConnectionMatchMode == MATCH_MAC_AND_NAME)) {
+      display.setCursor(113, yPos);
+      display.print("*");
+    }
   }
 
   display.display();
@@ -1806,7 +1925,7 @@ void handleUITimeout(unsigned long now) {
       Serial.println(F("UI Timeout: Cursor Reset"));
     }
     // 2. 각종 메뉴 상태일 때 -> 메인 화면으로 강제 복귀
-    else if (currentState == MODE_SELECT || currentState == SLOT_MENU || currentState == SCAN_MENU || currentState == CLIENT_MENU) {
+    else if (currentState == MODE_SELECT || currentState == SLOT_MENU || currentState == SCAN_MENU || currentState == CLIENT_MENU || currentState == CONNECTION_MODE_MENU) {
       currentState = MAIN_MENU;
       currentSelection = -1;
       selectedSlotIdx = -1;
@@ -2162,15 +2281,17 @@ void connect_callback(uint16_t conn_handle) {
       }
     }
 
-    // MAC 미일치일 때만 이름 fallback 허용 (동일 이름 슬롯이 정확히 1개일 때)
+    // MAC 미일치일 때 이름 fallback은 연결방식이 MAC+NAME일 때만 허용
     // 주의: 슬롯에 저장된 MAC은 절대 변경하지 않음.
-    if (foundSlot == -1 && nameMatchSlot >= 0) {
-      foundSlot = nameMatchSlot;
-      Serial.print(F(">>> HOST SLOT["));
-      Serial.print(foundSlot);
-      Serial.println(F("] CONNECTED BY NAME FALLBACK (MAC UNCHANGED) <<<"));
-    } else if (foundSlot == -1 && nameMatchSlot == -2) {
-      Serial.println(F(">>> NAME FALLBACK AMBIGUOUS: MULTIPLE SLOTS SAME NAME <<<"));
+    if (foundSlot == -1 && currentConnectionMatchMode == MATCH_MAC_AND_NAME) {
+      if (nameMatchSlot >= 0) {
+        foundSlot = nameMatchSlot;
+        Serial.print(F(">>> HOST SLOT["));
+        Serial.print(foundSlot);
+        Serial.println(F("] CONNECTED BY NAME FALLBACK (MAC UNCHANGED) <<<"));
+      } else if (nameMatchSlot == -2) {
+        Serial.println(F(">>> NAME FALLBACK AMBIGUOUS: MULTIPLE SLOTS SAME NAME <<<"));
+      }
     }
   }
 
@@ -2611,6 +2732,7 @@ void setup() {
   Watchdog.reset();
   InternalFS.begin();
   currentSystemMode = loadSystemMode();
+  currentConnectionMatchMode = loadConnectionMatchMode();
 
   if (currentSystemMode == MODE_HOST) {
     usb_midi_ptr = &usb_midi_host;
