@@ -70,6 +70,8 @@ using namespace Adafruit_LittleFS_Namespace;
 // -----------------------------------------------------------------------------
 uint8_t ignoredMac[6] = { 0 };
 uint32_t ignoreUntil = 0;
+uint8_t pendingUnknownMac[6] = { 0 };
+unsigned long pendingUnknownSince = 0;
 /** 블랙리스트 중인 피어 표시용 (CLEAR&BLOCK 시 clientSlot 이름 복사) */
 char ignoredPeerName[NAME_LEN] = "";
 unsigned long searchStartTime = 0;
@@ -91,7 +93,7 @@ volatile int encoderAccumulator = 0;
 /** 디텐트당 LUT 누적(보통 4; 메뉴가 2칸씩 움직이면 2로 낮춤) */
 const int ENC_STEPS_PER_DETENT = 4;
 unsigned long lastEncoderMoveTime = 0;
-const unsigned long ENCODER_GAP = 80;
+const unsigned long ENCODER_GAP = 0;
 uint8_t remoteHostBat = 0;
 bool blinkState = false;
 
@@ -280,8 +282,11 @@ void removeOldDevices() {
     // 마지막으로 발견된 지 5초(DEVICE_TIMEOUT)가 지났다면
     if (now - devices[i].lastSeen > DEVICE_TIMEOUT) {
       // 리스트에서 삭제 (뒤의 항목들을 앞으로 당김)
+      // 중요: devices[]와 device_reports[]의 인덱스를 항상 함께 유지해야
+      // 선택한 스캔 항목이 올바른 peer report로 연결됩니다.
       for (int j = i; j < deviceCount - 1; j++) {
         devices[j] = devices[j + 1];
+        device_reports[j] = device_reports[j + 1];
       }
       deviceCount--;
       // 인덱스 i는 증가시키지 않음 (당겨진 다음 항목을 검사해야 하므로)
@@ -409,6 +414,23 @@ void scan_callback(ble_gap_evt_adv_report_t *report) {
 
   if (strlen(name) == 0) {
     Bluefruit.Scanner.resume();
+    return;
+  }
+
+  // MAC 자동재연결이 아니면, OFFLINE 슬롯 이름 fallback 자동연결(모호성 없을 때만) 시도
+  int nameMatchSlot = -1;  // -1: none, -2: ambiguous
+  for (int i = 0; i < 3; i++) {
+    if (slots[i].status == OFFLINE && slots[i].name[0] != '\0' &&
+        strncasecmp(slots[i].name, name, NAME_LEN - 1) == 0) {
+      if (nameMatchSlot == -1) nameMatchSlot = i;
+      else nameMatchSlot = -2;
+    }
+  }
+
+  if (nameMatchSlot >= 0) {
+    Serial.printf("Slot %d name fallback found! Attempting Auto-Connect (MAC unchanged)...\n", nameMatchSlot + 1);
+    Bluefruit.Scanner.stop();
+    Bluefruit.Central.connect(report);
     return;
   }
 
@@ -1113,7 +1135,7 @@ void drawSlotRow(int y, int slotIdx) {
 
     int batBoxX = 102;
 
-    if (slots[slotIdx].battery >= 1) {
+    if (slots[slotIdx].battery >= 0) {
       int batVal = slots[slotIdx].battery;
 
       if (batVal > 40) {
@@ -1303,7 +1325,7 @@ void encoderISR() {
   int8_t delta = ENC_QDEC_LUT[idx];
   encPrevState = curr;
   if (delta) {
-    // 반대 방향으로 첫 펄스가 오면 잔여 누적(+/- 몇)과 상쇄되어 첫 디텐트가 묻힘 → 방향 바뀌면 새 방향만 남김
+    // 방향 반전 시 잔여 누적으로 첫 디텐트가 묻히는 현상을 줄임
     if ((encoderAccumulator > 0 && delta < 0) || (encoderAccumulator < 0 && delta > 0)) {
       encoderAccumulator = delta;
     } else {
@@ -1328,13 +1350,12 @@ void handleEncoder(unsigned long now) {
     modeSelection = (int)encoderPos;
   } else if (currentState == MAIN_MENU) {
     if (currentSystemMode == MODE_HOST) {
-      // [호스트 모드] 기존 슬롯 0, 1, 2 이동 허용
+      // [호스트 모드] 첫 디텐트도 실제 이동으로 반영
       if (currentSelection == -1) encoderPos = 0;
-      else encoderPos = constrain(encoderPos + moveStep, 0, 2);
+      encoderPos = constrain(encoderPos + moveStep, 0, 2);
       currentSelection = (int)encoderPos;
     } else {
       // [클라이언트 모드] 슬롯 개념이 없으므로 선택을 -1(없음)로 고정
-      // 이렇게 하면 호스트용 슬롯 UI가 나타나지 않습니다.
       currentSelection = -1;
       encoderPos = 0;
     }
@@ -1486,6 +1507,11 @@ void handleButton(unsigned long now) {
               currentState = SCAN_MENU;
               scanMenuSelection = 0;
               encoderPos = 0;
+              // 새 등록 시작 시 스캔 캐시 초기화(이전 슬롯의 오래된 항목 방지)
+              deviceCount = 0;
+              displayDeviceCount = 0;
+              isTargetLocked = false;
+              memset(lockedMac, 0, 6);
             } else {
               currentState = SLOT_MENU;
               slotMenuSelection = 0;
@@ -1604,12 +1630,18 @@ void handleButton(unsigned long now) {
           selectedSlotIdx = -1;
         } else {
           int devIdx = scanMenuSelection - 1;
-          if (isTargetLocked && macEqual(lockedMac, devices[devIdx].mac)) {
+          if (devIdx >= 0 && devIdx < deviceCount &&
+              isTargetLocked && macEqual(lockedMac, devices[devIdx].mac)) {
             Bluefruit.Scanner.stop();
             delay(100);
             Bluefruit.Central.connect(&device_reports[devIdx]);
             currentState = MAIN_MENU;
             currentSelection = -1;
+          } else {
+            strncpy(errorMsg, "SCAN REFRESH", 19);
+            errorMsg[19] = '\0';
+            errorMsgUntil = millis() + 1000;
+            g_displayRefreshRequest = true;
           }
         }
       }
@@ -1630,8 +1662,11 @@ void handleButton(unsigned long now) {
           scanMenuSelection = 0;
           encoderPos = 0;
 
-          // 기존 타겟 락 해제
+          // 기존 타겟/스캔 캐시 해제
           isTargetLocked = false;
+          memset(lockedMac, 0, 6);
+          deviceCount = 0;
+          displayDeviceCount = 0;
 
           // 스캐너 시작 보장
           if (!Bluefruit.Scanner.isRunning()) {
@@ -2096,45 +2131,70 @@ void connect_callback(uint16_t conn_handle) {
   int foundSlot = -1;
   char currentPeerName[NAME_LEN] = { 0 };
   conn->getPeerName(currentPeerName, sizeof(currentPeerName));
+  if (currentPeerName[0] == '\0' || strcasecmp(currentPeerName, "UNKNOWN") == 0) {
+    char scanName[NAME_LEN] = { 0 };
+    if (findScanListNameForMac(peer_addr.addr, scanName, sizeof(scanName)) && scanName[0] != '\0') {
+      strncpy(currentPeerName, scanName, NAME_LEN - 1);
+      currentPeerName[NAME_LEN - 1] = '\0';
+    }
+  }
 
   if (selectedSlotIdx != -1) {
     foundSlot = selectedSlotIdx;
   } else {
+    int nameMatchSlot = -1;  // -1: none, -2: ambiguous
+
     for (int i = 0; i < 3; i++) {
       if (slots[i].status != EMPTY) {
-        // 1. MAC 주소 직접 비교
+        // 1순위: MAC 일치 슬롯
         bool macMatched = macEqual(slots[i].mac, peer_addr.addr);
-
-        // 2. 이름 비교 (저장된 이름 길이만큼 비교)
-        int savedLen = strlen(slots[i].name);
-        bool nameMatched = (savedLen > 0 && strncasecmp(slots[i].name, currentPeerName, savedLen) == 0);
-
-        if (macMatched || nameMatched) {
+        if (macMatched) {
           foundSlot = i;
-
-          // 이름 일치 시 MAC 갱신(가변 MAC)
-          if (!macMatched && nameMatched) {
-            Serial.print(F(">>> HOST SLOT["));
-            Serial.print(i);
-            Serial.println(F("] MAC UPDATED BY NAME MATCH <<<"));
-            memcpy(slots[i].mac, peer_addr.addr, 6);
-            saveConfig();  // 변경된 MAC 저장
-          }
           break;
         }
+
+        // 2순위 후보: MAC 불일치 시 동일 이름 슬롯(모호성 체크용)
+        if (currentPeerName[0] != '\0' && slots[i].name[0] != '\0' &&
+            strncasecmp(slots[i].name, currentPeerName, NAME_LEN - 1) == 0) {
+          if (nameMatchSlot == -1) nameMatchSlot = i;
+          else nameMatchSlot = -2;
+        }
       }
+    }
+
+    // MAC 미일치일 때만 이름 fallback 허용 (동일 이름 슬롯이 정확히 1개일 때)
+    // 주의: 슬롯에 저장된 MAC은 절대 변경하지 않음.
+    if (foundSlot == -1 && nameMatchSlot >= 0) {
+      foundSlot = nameMatchSlot;
+      Serial.print(F(">>> HOST SLOT["));
+      Serial.print(foundSlot);
+      Serial.println(F("] CONNECTED BY NAME FALLBACK (MAC UNCHANGED) <<<"));
+    } else if (foundSlot == -1 && nameMatchSlot == -2) {
+      Serial.println(F(">>> NAME FALLBACK AMBIGUOUS: MULTIPLE SLOTS SAME NAME <<<"));
     }
   }
 
   if (foundSlot == -1) {
+    unsigned long nowMs = millis();
+    bool samePendingUnknown = (pendingUnknownSince != 0 && macEqual(pendingUnknownMac, peer_addr.addr));
+    if (!samePendingUnknown) {
+      memcpy(pendingUnknownMac, peer_addr.addr, 6);
+      pendingUnknownSince = nowMs;
+    }
+
     Serial.print(F(">>> UNKNOWN HOST REJECTED: "));
     Serial.println(currentPeerName);
-    strncpy(errorMsg, "UNKNOWN DEVICE", 19);
-    errorMsgUntil = millis() + 1000;
-    g_displayRefreshRequest = true;
+    // 순간적인 연결 타이밍 미스는 경고를 유예해 화면 깜빡임을 줄임
+    if (samePendingUnknown && (nowMs - pendingUnknownSince >= 500)) {
+      strncpy(errorMsg, "UNKNOWN DEVICE", 19);
+      errorMsgUntil = nowMs + 1000;
+      g_displayRefreshRequest = true;
+    }
     conn->disconnect();
     return;
   }
+
+  pendingUnknownSince = 0;
 
   // 수동 연결 메시지 표시 (화면 갱신은 loop에서만)
   if (selectedSlotIdx != -1) {
@@ -2149,7 +2209,7 @@ void connect_callback(uint16_t conn_handle) {
   Watchdog.reset();
 
   bool svcFound = false;
-  for (int retry = 0; retry < 5; retry++) {
+  for (int retry = 0; retry < 6; retry++) {
     Watchdog.reset();
     if (ble_midi_svc[foundSlot].discover(conn_handle)) {
       svcFound = true;
@@ -2157,8 +2217,14 @@ void connect_callback(uint16_t conn_handle) {
       break;
     }
     lastInteractionTime = millis();
-    if (retry < 4) {
-      uint32_t waitMs = (retry == 0) ? 400UL : (800UL + (uint32_t)retry * 400UL);
+    if (retry < 5) {
+      // GTKEY non-preferred 5초 거부 윈도우를 안전하게 넘기기 위한 백오프
+      uint32_t waitMs = 0;
+      if (retry == 0) waitMs = 400UL;
+      else if (retry == 1) waitMs = 1200UL;
+      else if (retry == 2) waitMs = 1600UL;
+      else if (retry == 3) waitMs = 2000UL;
+      else waitMs = 1500UL;  // 마지막 재시도 전 5초+ 여유 확보
       while (waitMs > 0) {
         uint32_t chunk = waitMs > 400 ? 400 : waitMs;
         delay(chunk);
@@ -2211,7 +2277,15 @@ void connect_callback(uint16_t conn_handle) {
     if (ble_bat_svc[foundSlot].discover(conn_handle)) {
       if (ble_bat_chr[foundSlot].discover()) {
         ble_bat_chr[foundSlot].enableNotify();
-        slots[foundSlot].battery = ble_bat_chr[foundSlot].read8();
+        int8_t bat = -1;
+        for (int b_retry = 0; b_retry < 3; b_retry++) {
+          bat = (int8_t)ble_bat_chr[foundSlot].read8();
+          if (bat >= 0 && bat <= 100) break;
+          if (b_retry < 2) delay(120);
+        }
+        if (bat >= 0 && bat <= 100) {
+          slots[foundSlot].battery = bat;
+        }
       }
     }
 
@@ -2223,7 +2297,11 @@ void connect_callback(uint16_t conn_handle) {
     if (haveScanName) {
       if (strlen(connectedName) == 0 || strlen(scanName) > strlen(connectedName)) pick = scanName;
     }
-    if (strlen(pick) == 0) pick = "MIDI Device";
+    if (strlen(pick) == 0 || strcasecmp(pick, "UNKNOWN") == 0) {
+      // 연결 직후 이름 조회가 비어도 기존 슬롯 이름이 있으면 유지
+      if (slots[foundSlot].name[0] != '\0') pick = slots[foundSlot].name;
+      else pick = "MIDI Device";
+    }
     strncpy(slots[foundSlot].name, pick, 14);
     slots[foundSlot].name[14] = '\0';
     memcpy(slots[foundSlot].mac, peer_addr.addr, 6);
