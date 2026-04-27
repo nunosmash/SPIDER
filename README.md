@@ -132,7 +132,7 @@ Full wiring, menus, and edge cases: **`spider-manual.html`** in the Ash Sound Wo
 
 
 ## Documentation
-- Assambles Vid : https://youtu.be/Al2et1Eq5mc?si=OzghE5cKjoRzadla
+- Assembly Vid : https://youtu.be/Al2et1Eq5mc?si=OzghE5cKjoRzadla
 - Full manual: `spider-manual.html`  
 - Other projects: [github.com/nunosmash](https://github.com/nunosmash)
 
