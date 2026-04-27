@@ -1,0 +1,18 @@
+How to set pin numbers for nRF52840 nice!nano v2.0
+
+Refer to:
+https://github.com/pdcook/nRFMicro-Arduino-Core?tab=readme-ov-file
+
+Replace the variant.h and variant.cpp files located in a path similar to:
+C:\Users\Administrator\AppData\Local\Arduino15\packages\adafruit\hardware\nrf52\1.7.0\variants\feather_nrf52840_express
+
+How to change TinyUSB serial name
+
+Raspberry Pi Pico 2
+C:\Users\Administrator\AppData\Local\Arduino15\packages\rp2040\hardware\rp2040\5.4.4\libraries\Adafruit_TinyUSB_Arduino\src\arduino
+
+nRF52840
+C:\Users\Administrator\AppData\Local\Arduino15\packages\adafruit\hardware\nrf52\1.7.0\libraries\Adafruit_TinyUSB_Arduino\src\arduino
+
+Go to the corresponding path and edit the Adafruit_USBD_CDC.cpp file.
+Find setStringDescriptor("TinyUSB Serial"); and change the string inside the quotes to modify the name shown when connecting the board via serial.
