@@ -1,9 +1,10 @@
-[README.md](https://github.com/user-attachments/files/26697123/README.md)
 # SPIDER
 
 **BLE MIDI gateway** — bridge **Bluetooth LE MIDI** controllers to **USB MIDI** and **DIN MIDI**, with up to **three** simultaneous BLE devices, **fixed slot routing**, and **HOST** / **CLIENT** roles for stage and DAWless setups.
 
 Part of the **Ash Sound Works** custom tools for live and studio — by sound artist and producer **Ash (Ahn Sunghoon)** · [GitHub](https://github.com/nunosmash)
+
+[![SPIDER](https://raw.githubusercontent.com/nunosmash/SPIDER/refs/heads/main/SPIDER_img.jpg)](https://youtu.be/Al2et1Eq5mc?si=DPkdCoxhtiU5xMxv)
 
 ---
 
@@ -116,23 +117,8 @@ Full wiring, menus, and edge cases: **`spider-manual.html`** in the Ash Sound Wo
 
 ---
 
-##  Hardware Specifications (BOM)
-
-| Category | Component Description | Qty |
-| :--- | :--- | :---: |
-| **MCU** | nRF52840 (nice!nano v2.0 SuperMini) | 1 |
-| **Display** | 0.91" OLED Module (128x64) | 1 |
-| **Optocoupler** | 6N138 High-Speed Optocoupler | 1 |
-| **Diode** | 1N4001 Rectifier Diode | 1 |
-| **Capacitor** | 100μF Electrolytic Capacitor | 1 |
-| **Input** | EC11 Rotary Encoder w/ Push Switch | 1 |
-| **Connectors** | PJ-320A 3.5mm Stereo Jack | 2 |
-| **Power** | SS-12F23 Slide Switch | 1 |
-| **Resistors** | 220Ω (x2), 330Ω (x2), 150Ω, 1kΩ, 4.7kΩ, 10Ω, 30Ω | 9 |
-
-
 ## Documentation
-- Assembly Vid : https://youtu.be/Al2et1Eq5mc?si=OzghE5cKjoRzadla
+
 - Full manual: `spider-manual.html`  
 - Other projects: [github.com/nunosmash](https://github.com/nunosmash)
 
