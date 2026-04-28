@@ -3,7 +3,8 @@
 
 **BLE MIDI gateway** — bridge **Bluetooth LE MIDI** controllers to **USB MIDI** and **DIN MIDI**, with up to **three** simultaneous BLE devices, **fixed slot routing**, and **HOST** / **CLIENT** roles for stage and DAWless setups.
 
-Part of the **Ash Sound Works** custom tools for live and studio — by sound artist and producer **Ash (Ahn Sunghoon)** · [GitHub](https://github.com/nunosmash)
+Part of the **Ash Sound Works** custom tools for live and studio — by sound artist and producer **Ash (Ahn Sunghoon)** · [GitHub](https://github.com/nunosmash) / 
+[Manual](http://ashsoundworks.com/spider-manual.html)
 
 [![SPIDER](https://raw.githubusercontent.com/nunosmash/SPIDER/refs/heads/main/SPIDER_img.jpg)](https://youtu.be/Al2et1Eq5mc?si=DPkdCoxhtiU5xMxv)
 
