@@ -147,6 +147,10 @@ ConnectionMatchMode currentConnectionMatchMode = MATCH_MAC_AND_NAME;
 void drawConnectionModeMenu();
 void saveConnectionMatchMode(ConnectionMatchMode mode);
 ConnectionMatchMode loadConnectionMatchMode();
+void drawEncoderDirectionMenu();
+void drawSetupMenu();
+void saveEncoderReversed(bool reversed);
+bool loadEncoderReversed();
 
 struct Device {
   uint8_t mac[6];
@@ -160,12 +164,15 @@ enum State { MAIN_MENU,
              SCAN_MENU,
              MODE_SELECT,
              CLIENT_MENU,
-             CONNECTION_MODE_MENU };
+             CONNECTION_MODE_MENU,
+             ENCODER_DIRECTION_MENU,
+             SETUP_MENU };
 State currentState = MAIN_MENU;
 SystemMode currentSystemMode = MODE_HOST;
 int modeSelection = 0;
 int clientMenuSelection = 0;
 unsigned long buttonPressStartTime = 0;
+bool isEncoderReversed = false;
 
 enum SlotStatus { EMPTY,
                   OFFLINE,
@@ -193,6 +200,8 @@ int slotMenuSelection = 0;
 int selectedSlotIdx = -1;
 int scanMenuSelection = 0;
 int connectionModeSelection = 0;
+int encoderDirectionSelection = 0;
+int setupMenuSelection = 0;
 
 bool macEqual(const uint8_t *a, const uint8_t *b) {
   for (int i = 0; i < 6; i++) {
@@ -860,6 +869,19 @@ void drawStatusBarLeft() {
 
 void updateDisplay() {
   unsigned long now = millis();
+  // 펌웨어 업데이트 카운트다운(5~8초)은 handleButton이 OLED에 직접 그림.
+  // 여기서 clearDisplay 하면 매 프레임 덮어써서 깜빡임이 난다.
+  if (buttonState && digitalRead(BUTTON_PIN) == LOW) {
+    unsigned long held = now - buttonPressStartTime;
+    if (held > 5000) {
+      int countdown = 8 - (int)(held / 1000);
+      if (countdown > 0) {
+        g_displayRefreshRequest = false;
+        return;
+      }
+    }
+  }
+
   display.clearDisplay();
   display.setTextSize(1);
 
@@ -869,6 +891,14 @@ void updateDisplay() {
   }
   if (currentState == CONNECTION_MODE_MENU) {
     drawConnectionModeMenu();
+    return;
+  }
+  if (currentState == ENCODER_DIRECTION_MENU) {
+    drawEncoderDirectionMenu();
+    return;
+  }
+  if (currentState == SETUP_MENU) {
+    drawSetupMenu();
     return;
   }
 
@@ -1106,6 +1136,38 @@ ConnectionMatchMode loadConnectionMatchMode() {
     }
   }
   return mode;
+}
+
+void saveEncoderReversed(bool reversed) {
+  if (InternalFS.exists("/enc_dir.bin")) {
+    InternalFS.remove("/enc_dir.bin");
+  }
+
+  File file = InternalFS.open("/enc_dir.bin", Adafruit_LittleFS_Namespace::FILE_O_WRITE);
+  if (file) {
+    uint8_t data = reversed ? 1 : 0;
+    file.write(&data, 1);
+    file.flush();
+    file.close();
+    Serial.print(F(">>> ENCODER DIRECTION SAVED: "));
+    Serial.println(reversed ? "REVERSED" : "NORMAL");
+  } else {
+    Serial.println(F(">>> ERROR: Failed to open /enc_dir.bin for writing!"));
+  }
+}
+
+bool loadEncoderReversed() {
+  bool reversed = false;
+  if (InternalFS.exists("/enc_dir.bin")) {
+    File file = InternalFS.open("/enc_dir.bin", FILE_O_READ);
+    if (file) {
+      uint8_t data = 0;
+      file.read(&data, 1);
+      file.close();
+      reversed = (data == 1);
+    }
+  }
+  return reversed;
 }
 
 void drawSlotRow(int y, int slotIdx) {
@@ -1384,8 +1446,10 @@ void handleEncoder(unsigned long now) {
   if (abs(encoderAccumulator) < ENC_STEPS_PER_DETENT) return;
   if (now - lastEncoderMoveTime < ENCODER_GAP) return;
 
-  int moveStep = (encoderAccumulator > 0) ? 1 : -1;
-  encoderAccumulator -= moveStep * ENC_STEPS_PER_DETENT;
+  int rawMoveStep = (encoderAccumulator > 0) ? 1 : -1;
+  int moveStep = rawMoveStep;
+  if (isEncoderReversed) moveStep = -moveStep;
+  encoderAccumulator -= rawMoveStep * ENC_STEPS_PER_DETENT;
 
   lastEncoderMoveTime = now;
   lastInteractionTime = now;
@@ -1395,6 +1459,9 @@ void handleEncoder(unsigned long now) {
     int maxModeSelect = (currentSystemMode == MODE_HOST) ? 2 : 1;
     encoderPos = constrain(encoderPos + moveStep, 0, maxModeSelect);
     modeSelection = (int)encoderPos;
+  } else if (currentState == SETUP_MENU) {
+    setupMenuSelection = constrain(setupMenuSelection + moveStep, 0, 2);
+    encoderPos = setupMenuSelection;
   } else if (currentState == MAIN_MENU) {
     if (currentSystemMode == MODE_HOST) {
       // [호스트 모드] 첫 디텐트도 실제 이동으로 반영
@@ -1433,6 +1500,9 @@ void handleEncoder(unsigned long now) {
   } else if (currentState == CONNECTION_MODE_MENU) {
     connectionModeSelection = constrain(connectionModeSelection + moveStep, 0, 2);
     encoderPos = connectionModeSelection;
+  } else if (currentState == ENCODER_DIRECTION_MENU) {
+    encoderDirectionSelection = constrain(encoderDirectionSelection + moveStep, 0, 2);
+    encoderPos = encoderDirectionSelection;
   }
 }
 
@@ -1529,9 +1599,9 @@ void handleButton(unsigned long now) {
           currentSelection = -1;
           encoderPos = 0;
         } else if (modeSelection == 1 && currentSystemMode == MODE_HOST) {
-          // [1: CONNECTION TYPE] 선택 시
-          currentState = CONNECTION_MODE_MENU;
-          connectionModeSelection = 0;
+          // [1: SYSTEM SETUP] 선택 시
+          currentState = SETUP_MENU;
+          setupMenuSelection = 0;
           encoderPos = 0;
         } else if ((currentSystemMode == MODE_HOST && modeSelection == 2) ||
                    (currentSystemMode == MODE_CLIENT && modeSelection == 1)) {
@@ -1551,29 +1621,70 @@ void handleButton(unsigned long now) {
         }
       }
 
-      else if (currentState == CONNECTION_MODE_MENU) {
-        if (connectionModeSelection == 0) {
+      else if (currentState == SETUP_MENU) {
+        if (setupMenuSelection == 0) {
           currentState = MODE_SELECT;
           modeSelection = 1;
           encoderPos = modeSelection;
+        } else if (setupMenuSelection == 1) {
+          currentState = CONNECTION_MODE_MENU;
+          connectionModeSelection = 0;
+          encoderPos = 0;
+        } else if (setupMenuSelection == 2) {
+          currentState = ENCODER_DIRECTION_MENU;
+          encoderDirectionSelection = 0;
+          encoderPos = 0;
+        }
+      }
+
+      else if (currentState == CONNECTION_MODE_MENU) {
+        if (connectionModeSelection == 0) {
+          currentState = SETUP_MENU;
+          setupMenuSelection = 1;
+          encoderPos = setupMenuSelection;
         } else if (connectionModeSelection == 1) {
           currentConnectionMatchMode = MATCH_MAC_ONLY;
           saveConnectionMatchMode(currentConnectionMatchMode);
           strncpy(errorMsg, "MATCH: MAC ONLY", 19);
           errorMsg[19] = '\0';
           errorMsgUntil = millis() + 1200;
-          currentState = MODE_SELECT;
-          modeSelection = 1;
-          encoderPos = modeSelection;
+          currentState = SETUP_MENU;
+          setupMenuSelection = 1;
+          encoderPos = setupMenuSelection;
         } else if (connectionModeSelection == 2) {
           currentConnectionMatchMode = MATCH_MAC_AND_NAME;
           saveConnectionMatchMode(currentConnectionMatchMode);
           strncpy(errorMsg, "MATCH: MAC+NAME", 19);
           errorMsg[19] = '\0';
           errorMsgUntil = millis() + 1200;
-          currentState = MODE_SELECT;
-          modeSelection = 1;
-          encoderPos = modeSelection;
+          currentState = SETUP_MENU;
+          setupMenuSelection = 1;
+          encoderPos = setupMenuSelection;
+        }
+      }
+      else if (currentState == ENCODER_DIRECTION_MENU) {
+        if (encoderDirectionSelection == 0) {
+          currentState = SETUP_MENU;
+          setupMenuSelection = 2;
+          encoderPos = setupMenuSelection;
+        } else if (encoderDirectionSelection == 1) {
+          isEncoderReversed = false;
+          saveEncoderReversed(isEncoderReversed);
+          strncpy(errorMsg, "ENC: NORMAL", 19);
+          errorMsg[19] = '\0';
+          errorMsgUntil = millis() + 1200;
+          currentState = SETUP_MENU;
+          setupMenuSelection = 2;
+          encoderPos = setupMenuSelection;
+        } else if (encoderDirectionSelection == 2) {
+          isEncoderReversed = true;
+          saveEncoderReversed(isEncoderReversed);
+          strncpy(errorMsg, "ENC: REVERSED", 19);
+          errorMsg[19] = '\0';
+          errorMsgUntil = millis() + 1200;
+          currentState = SETUP_MENU;
+          setupMenuSelection = 2;
+          encoderPos = setupMenuSelection;
         }
       }
 
@@ -1794,14 +1905,6 @@ void handleButton(unsigned long now) {
 }
 
 void drawModeSelect() {
-  // 부트로더 카운트다운 중에는 시스템 메뉴 미표시
-  // handleButton의 카운트다운 화면이 우선권을 갖도록 양보하는 로직입니다.
-  if (buttonState && (millis() - buttonPressStartTime > 5000)) {
-    // updateDisplay()가 이미 clearDisplay() 했으므로 검은 화면을 OLED에 반영
-    display.display();
-    return;
-  }
-
   display.clearDisplay();
 
   // 상단 타이틀
@@ -1815,18 +1918,50 @@ void drawModeSelect() {
   display.drawRect(0, 16, 128, 48, WHITE);
 
   // 현재 모드에 따라 메뉴 리스트 구성
-  const char *options[3];
+  const char *hostOptions[3] = { "<< BACK", "SYSTEM SETUP", "TO CLIENT MODE" };
+  const char *clientOptions[2] = { "<< BACK", "TO HOST MODE" };
   int optionCount = 0;
-  options[optionCount++] = "<< BACK";
+  const char **options = nullptr;
   if (currentSystemMode == MODE_HOST) {
-    options[optionCount++] = "CONNECTION TYPE";
+    options = hostOptions;
+    optionCount = 3;
+  } else {
+    options = clientOptions;
+    optionCount = 2;
   }
-  options[optionCount++] = (currentSystemMode == MODE_HOST) ? "TO CLIENT MODE" : "TO HOST MODE";
 
   for (int i = 0; i < optionCount; i++) {
     int yPos = 24 + (i * 12);
 
     if (modeSelection == i) {
+      display.fillRect(2, yPos - 2, 124, 13, WHITE);
+      display.setTextColor(BLACK);
+    } else {
+      display.setTextColor(WHITE);
+    }
+
+    display.setCursor(5, yPos);
+    display.println(options[i]);
+  }
+
+  display.display();
+}
+
+void drawSetupMenu() {
+  display.clearDisplay();
+
+  display.fillRect(0, 0, 128, 14, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(2, 3);
+  display.print(F("SYSTEM SETUP"));
+
+  display.drawRect(0, 16, 128, 48, WHITE);
+
+  const char *options[3] = { "<< BACK", "CONNECTION TYPE", "ENCODER DIRECTION" };
+  for (int i = 0; i < 3; i++) {
+    int yPos = 24 + (i * 12);
+
+    if (setupMenuSelection == i) {
       display.fillRect(2, yPos - 2, 124, 13, WHITE);
       display.setTextColor(BLACK);
     } else {
@@ -1865,6 +2000,39 @@ void drawConnectionModeMenu() {
 
     if ((i == 1 && currentConnectionMatchMode == MATCH_MAC_ONLY) ||
         (i == 2 && currentConnectionMatchMode == MATCH_MAC_AND_NAME)) {
+      display.setCursor(113, yPos);
+      display.print("*");
+    }
+  }
+
+  display.display();
+}
+
+void drawEncoderDirectionMenu() {
+  display.clearDisplay();
+
+  display.fillRect(0, 0, 128, 14, WHITE);
+  display.setTextColor(BLACK);
+  display.setCursor(2, 3);
+  display.print(F("ENCODER DIRECTION"));
+
+  display.drawRect(0, 16, 128, 48, WHITE);
+
+  const char *options[3] = { "<< BACK", "NORMAL", "REVERSED" };
+  for (int i = 0; i < 3; i++) {
+    int yPos = 24 + (i * 12);
+    if (encoderDirectionSelection == i) {
+      display.fillRect(2, yPos - 2, 124, 13, WHITE);
+      display.setTextColor(BLACK);
+    } else {
+      display.setTextColor(WHITE);
+    }
+
+    display.setCursor(5, yPos);
+    display.print(options[i]);
+
+    if ((i == 1 && !isEncoderReversed) ||
+        (i == 2 && isEncoderReversed)) {
       display.setCursor(113, yPos);
       display.print("*");
     }
@@ -1925,7 +2093,7 @@ void handleUITimeout(unsigned long now) {
       Serial.println(F("UI Timeout: Cursor Reset"));
     }
     // 2. 각종 메뉴 상태일 때 -> 메인 화면으로 강제 복귀
-    else if (currentState == MODE_SELECT || currentState == SLOT_MENU || currentState == SCAN_MENU || currentState == CLIENT_MENU || currentState == CONNECTION_MODE_MENU) {
+    else if (currentState == MODE_SELECT || currentState == SLOT_MENU || currentState == SCAN_MENU || currentState == CLIENT_MENU || currentState == CONNECTION_MODE_MENU || currentState == ENCODER_DIRECTION_MENU || currentState == SETUP_MENU) {
       currentState = MAIN_MENU;
       currentSelection = -1;
       selectedSlotIdx = -1;
@@ -2733,6 +2901,7 @@ void setup() {
   InternalFS.begin();
   currentSystemMode = loadSystemMode();
   currentConnectionMatchMode = loadConnectionMatchMode();
+  isEncoderReversed = loadEncoderReversed();
 
   if (currentSystemMode == MODE_HOST) {
     usb_midi_ptr = &usb_midi_host;
